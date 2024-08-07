@@ -19,29 +19,30 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 
+	"github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/go-logr/logr"
 	"go.uber.org/zap/zapcore"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
-
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
+	"github.com/reborn1867/k8s-resource-tracer/pkg/git"
 	"github.com/reborn1867/k8s-resource-tracer/pkg/webhooks/listener"
 )
 
 func main() {
 	var debug bool
-	flag.BoolVar(&debug, "debug", false, "Enable debug logging")
-
-	opts := zap.Options{
-		Development: true,
-	}
-	opts.BindFlags(flag.CommandLine)
-	flag.Parse()
+	var enableGitReview bool
+	var gitURL string
+	var gitPath string
+	var subPath string
+	var branch string
 
 	var logLevel zapcore.Level
 	if debug {
@@ -50,11 +51,69 @@ func main() {
 		logLevel = zapcore.InfoLevel
 
 	}
+
+	opts := zap.Options{
+		Development: true,
+	}
+
 	logger := zap.New(zap.UseFlagOptions(&opts), zap.Level(logLevel))
+	log.SetLogger(logger)
+
+	k8sHost, ok := os.LookupEnv("KUBERNETES_SERVICE_HOST")
+	if !ok {
+		logger.Error(fmt.Errorf("internal error"), "failed to get env KUBERNETES_SERVICE_HOST")
+		os.Exit(1)
+	}
+
+	flag.BoolVar(&debug, "debug", false, "Enable debug logging")
+	flag.BoolVar(&enableGitReview, "enableGitReview", false, "Enable git review")
+	flag.StringVar(&gitURL, "gitURL", "", "url of git repository")
+	flag.StringVar(&gitPath, "gitPath", "", "local path of git repository")
+	flag.StringVar(&subPath, "subPath", "", "relative path in git repository")
+	flag.StringVar(&branch, "branch", k8sHost, "git branch")
+
+	opts.BindFlags(flag.CommandLine)
+	flag.Parse()
+
+	lw := &listener.ListenerWebhook{
+		Logger:          logger,
+		EnableGitReview: enableGitReview,
+	}
+
+	if enableGitReview {
+		userName, _ := os.LookupEnv("GIT_USER_NAME")
+		pwd, _ := os.LookupEnv("GIT_PASSWORD")
+
+		auth := &http.BasicAuth{
+			Username: userName,
+			Password: pwd,
+		}
+
+		lw.GitConfig = listener.GitConfig{
+			GitPath:   gitPath,
+			SubPath:   subPath,
+			GitBranch: branch,
+			GitAuth:   auth,
+		}
+
+		if err := git.Clone(gitURL, gitPath, auth); err != nil {
+			logger.Error(err, "failed to clone git repo", "url", gitURL, "path", gitPath)
+			os.Exit(1)
+		}
+
+		if err := git.Checkout(gitPath, branch, logger); err != nil {
+			logger.Error(err, "failed to checkout to git branch", "path", gitPath, "branch", branch)
+			os.Exit(1)
+		}
+
+		if err := git.Pull(gitPath, branch); err != nil {
+			logger.Error(err, "failed to pull remote repository", "path", gitPath)
+			os.Exit(1)
+		}
+	}
 
 	webhookServer := webhook.NewServer(webhook.Options{})
-
-	webhookServer.Register("/listen", &admission.Webhook{Handler: &listener.ListenerWebhook{Logger: logger}, LogConstructor: func(base logr.Logger, req *admission.Request) logr.Logger {
+	webhookServer.Register("/listen", &admission.Webhook{Handler: lw, LogConstructor: func(base logr.Logger, req *admission.Request) logr.Logger {
 		return logger
 	}})
 

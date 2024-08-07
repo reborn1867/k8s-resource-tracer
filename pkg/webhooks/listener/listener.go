@@ -4,14 +4,29 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"strings"
 
+	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-logr/logr"
 	jd "github.com/josephburnett/jd/lib"
+	"gopkg.in/yaml.v2"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	"github.com/reborn1867/k8s-resource-tracer/pkg/git"
 )
 
 type ListenerWebhook struct {
-	Logger logr.Logger
+	Logger          logr.Logger
+	EnableGitReview bool
+	GitConfig
+}
+
+type GitConfig struct {
+	GitPath   string
+	SubPath   string
+	GitBranch string
+	GitAuth   transport.AuthMethod
 }
 
 type CustomRenderOption struct {
@@ -67,9 +82,9 @@ func (l *ListenerWebhook) Handle(ctx context.Context, r admission.Request) admis
 		return admission.Errored(400, err)
 	}
 
-	currentMetadata := obj["metadata"].(map[string]interface{})
+	newMetaData := obj["metadata"].(map[string]interface{})
 	oldMetadata := oldObj["metadata"].(map[string]interface{})
-	currentLabels, err := jd.NewJsonNode(currentMetadata["labels"])
+	newLabels, err := jd.NewJsonNode(newMetaData["labels"])
 	if err != nil {
 		l.Logger.Error(err, "failed to read labels of current object")
 		return admission.Errored(400, err)
@@ -81,7 +96,7 @@ func (l *ListenerWebhook) Handle(ctx context.Context, r admission.Request) admis
 		return admission.Errored(400, err)
 	}
 
-	currentAnnotations, err := jd.NewJsonNode(currentMetadata["annotations"])
+	newAnnotations, err := jd.NewJsonNode(newMetaData["annotations"])
 	if err != nil {
 		l.Logger.Error(err, "failed to read annotations of current object")
 		return admission.Errored(400, err)
@@ -93,7 +108,7 @@ func (l *ListenerWebhook) Handle(ctx context.Context, r admission.Request) admis
 	}
 
 	var fieldManagers []string
-	for _, f := range obj["metadata"].(map[string]interface{})["managedFields"].([]interface{}) {
+	for _, f := range newMetaData["managedFields"].([]interface{}) {
 		fieldManagers = append(fieldManagers, f.(map[string]interface{})["manager"].(string))
 	}
 
@@ -103,8 +118,8 @@ func (l *ListenerWebhook) Handle(ctx context.Context, r admission.Request) admis
 
 	specDiff := oldSpec.Diff(currentSpec).Render(jd.COLOR)
 	statusDiff := oldStatus.Diff(currentStatus).Render(jd.COLOR)
-	labelsDiff := oldLabels.Diff(currentLabels).Render(jd.COLOR)
-	annotationsDiff := oldAnnotations.Diff(currentAnnotations).Render(jd.COLOR)
+	labelsDiff := oldLabels.Diff(newLabels).Render(jd.COLOR)
+	annotationsDiff := oldAnnotations.Diff(newAnnotations).Render(jd.COLOR)
 
 	if specDiff == "" && statusDiff == "" && labelsDiff == "" && annotationsDiff == "" {
 		l.Logger.Info("No changes detected")
@@ -113,12 +128,49 @@ func (l *ListenerWebhook) Handle(ctx context.Context, r admission.Request) admis
 		fmt.Printf("status diff: \n%s\n", statusDiff)
 		fmt.Printf("labels diff: \n%s\n", labelsDiff)
 		fmt.Printf("annotation diff: \n%s\n", annotationsDiff)
-	}
 
-	if l.Logger.V(1).Enabled() {
-		l.Logger.V(1).Info("raw diff of the whole objects")
-		fmt.Printf("raw diff: \n%s\n", oldRaw.Diff(raw).Render(jd.COLOR))
+		if l.Logger.V(1).Enabled() {
+			l.Logger.V(1).Info("raw diff of the whole objects")
+			fmt.Printf("raw diff: \n%s\n", oldRaw.Diff(raw).Render(jd.COLOR))
+		}
+
+		if l.EnableGitReview {
+			gvk := buildGVK(obj)
+			fileName := fmt.Sprintf("%s.yaml", newMetaData["name"].(string))
+			subpath := filepath.Join(l.SubPath, newMetaData["namespace"].(string), gvk, fileName)
+
+			delete(obj["metadata"].(map[string]interface{}), "managedFields")
+			yamlOutput, err := yaml.Marshal(obj)
+			if err != nil {
+				l.Logger.Error(err, "failed to covert to yaml output")
+			}
+
+			if err := l.syncGit(subpath, r.UserInfo.Username, latestManager, yamlOutput); err != nil {
+				l.Logger.Error(err, "failed to sync git")
+			}
+		}
 	}
 
 	return admission.Allowed("allowed")
+}
+
+func (l *ListenerWebhook) syncGit(subpath, userInfo, fieldManager string, data []byte) error {
+	if err := git.CommitChange(l.GitPath, subpath, userInfo, fieldManager, data, l.Logger); err != nil {
+		return fmt.Errorf("failed to commit new object: %s", err)
+	}
+	l.Logger.Info("git commit successfully", "author", userInfo)
+
+	if err := git.PushToRemote(l.GitPath, l.GitAuth); err != nil {
+		return fmt.Errorf("failed to push to remote: %s", err)
+	}
+
+	l.Logger.Info("git push to remote successfully")
+
+	return nil
+}
+
+func buildGVK(obj map[string]interface{}) string {
+	apiVersion := obj["apiVersion"].(string)
+	gv := strings.ReplaceAll(apiVersion, "/", "-")
+	return fmt.Sprintf("%s.%s", gv, obj["kind"].(string))
 }

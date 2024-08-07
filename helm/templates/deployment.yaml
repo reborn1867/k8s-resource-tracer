@@ -37,6 +37,12 @@ spec:
           - /k8s-resource-tracer
           args:
           - --debug=false
+          - --enableGitReview=true
+          - --gitURL=https://github.com/reborn1867/trace-history
+          - --gitPath=/tmp/local
+          envFrom:
+          - secretRef:
+              name: git-credential
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"

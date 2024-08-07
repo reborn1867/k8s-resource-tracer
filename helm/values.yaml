@@ -10,8 +10,7 @@ image:
   # Overrides the image tag whose default is the chart appVersion.
   tag: "v0.0.1"
 
-imagePullSecrets:
- - name: image-pull
+imagePullSecrets: {}
 nameOverride: ""
 fullnameOverride: ""
 
@@ -29,8 +28,10 @@ serviceAccount:
 podAnnotations: {}
 podLabels: {}
 
-podSecurityContext: {}
-  # fsGroup: 2000
+podSecurityContext: 
+    runAsUser: 1000
+    runAsGroup: 3000
+    fsGroup: 2000
 
 securityContext: {}
   # capabilities:
@@ -85,6 +86,9 @@ volumes:
   secret:
     defaultMode: 420
     secretName: k8s-resource-tracer-serving-cert  
+- name: git
+  emptyDir:
+    sizeLimit: 500Mi
 # - name: foo
 #   secret:
 #     secretName: mysecret
@@ -95,7 +99,8 @@ volumeMounts:
 - mountPath: /tmp/k8s-webhook-server/serving-certs
   name: server-cert
   readOnly: true
-
+- mountPath: /repository
+  name: git
 nodeSelector: {}
 
 tolerations: []
@@ -105,4 +110,7 @@ affinity: {}
 test:
   enabled: false
 
-dockerConfigJson: {}
+
+git:
+  username: ""
+  password: ""
