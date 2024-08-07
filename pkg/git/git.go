@@ -62,15 +62,13 @@ func Checkout(path, branchName string, logger logr.Logger) error {
 		Create: true,
 	}
 
+	mirrorRemoteBranchRefSpec := fmt.Sprintf("refs/heads/%s:refs/heads/%s", branchName, branchName)
+	if err := fetchOrigin(r, mirrorRemoteBranchRefSpec, logger); err != nil {
+		return err
+	}
+
 	if err := w.Checkout(&branchCoOpts); err != nil {
 		logger.Error(err, "local checkout of branch failed, will attempt to fetch remote branch of same name.", "branchName", branchName)
-
-		mirrorRemoteBranchRefSpec := fmt.Sprintf("refs/heads/%s:refs/heads/%s", branchName, branchName)
-		if err := fetchOrigin(r, mirrorRemoteBranchRefSpec); err != nil {
-			return err
-		}
-
-		return w.Checkout(&branchCoOpts)
 	}
 	return nil
 }
@@ -131,7 +129,7 @@ func PushToRemote(path string, auth transport.AuthMethod) error {
 	})
 }
 
-func fetchOrigin(repo *gg.Repository, refSpecStr string) error {
+func fetchOrigin(repo *gg.Repository, refSpecStr string, logger logr.Logger) error {
 	remote, err := repo.Remote("origin")
 	if err != nil {
 		return err
@@ -146,7 +144,9 @@ func fetchOrigin(repo *gg.Repository, refSpecStr string) error {
 		RefSpecs: refSpecs,
 	}); err != nil {
 		if err == gg.NoErrAlreadyUpToDate {
-			fmt.Print("refs already up to date")
+			logger.Info("refs already up to date")
+		} else if _, ok := err.(gg.NoMatchingRefSpecError); ok {
+			logger.Info("refs does not exits in remote")
 		} else {
 			return fmt.Errorf("fetch origin failed: %v", err)
 		}

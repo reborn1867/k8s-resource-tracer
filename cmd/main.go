@@ -105,11 +105,6 @@ func main() {
 			logger.Error(err, "failed to checkout to git branch", "path", gitPath, "branch", branch)
 			os.Exit(1)
 		}
-
-		if err := git.Pull(gitPath, branch); err != nil {
-			logger.Error(err, "failed to pull remote repository", "path", gitPath)
-			os.Exit(1)
-		}
 	}
 
 	webhookServer := webhook.NewServer(webhook.Options{})
